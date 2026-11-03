@@ -22,11 +22,22 @@ export function createFirebaseStore(sdk, config, opts = {}) {
     signOut: () => signOut(authApi),
   };
   const data = { events: [], projects: [], tasks: [], activity: [] };
-  let notify = () => {}, onError = () => {}, unsubEvents = null, windowStart = null;
-  const listen = (name, q) => onSnapshot(q, s => { data[name] = s.docs.map(d => ({ id: d.id, ...d.data() })); notify({ ...data }); }, e => onError(e));
+  let notify = () => {}, onError = () => {}, windowStart = null;
+  // Juste après la connexion, Firebase peut refuser une lecture le temps de reconnaître le compte.
+  // On réessaie donc quelques fois avant d'afficher une erreur.
+  const stops = {}, gens = {};
+  function listen(name, q, tries = 0) {
+    if (stops[name]) stops[name]();
+    const gen = (gens[name] = (gens[name] || 0) + 1);
+    stops[name] = onSnapshot(q, s => { data[name] = s.docs.map(d => ({ id: d.id, ...d.data() })); notify({ ...data }); }, e => {
+      if (gen !== gens[name]) return;
+      console.error('Lecture refusée :', name, 'essai', tries + 1, e.code);
+      if (e.code === 'permission-denied' && tries < 4) { setTimeout(() => { if (gen === gens[name]) listen(name, q, tries + 1); }, 1000 * (tries + 1)); return; }
+      onError(e);
+    });
+  }
   function listenEvents() {
-    if (unsubEvents) unsubEvents();
-    unsubEvents = listen('events', query(collection(db, 'events'), where('endDate', '>=', windowStart)));
+    listen('events', query(collection(db, 'events'), where('endDate', '>=', windowStart)));
   }
   return {
     shared: true, auth,
