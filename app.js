@@ -58,6 +58,7 @@ function demoData() {
       { id: 'e1', title: 'Dîner presque parfait', date: d(2), endDate: d(2), allDay: false, start: '19:30', end: '23:00', place: 'Chez Lili', concerned: ALL_IDS, notes: 'Chacune apporte une chose.', addedBy: 'lili', createdAt: Date.now() - 5e6, ...base, rsvp: { lili: 'yes', apopo: 'yes', lalo: 'maybe' } },
       { id: 'e2', title: 'Tournage du vlog', date: d(5), endDate: d(5), allDay: false, start: '14:00', end: '17:00', place: 'Parc de Blossac', concerned: ['myeline', 'paupau', 'lalo', 'loulou'], notes: '', addedBy: 'paupau', createdAt: Date.now() - 3e6, ...base },
       { id: 'e3', title: 'Week-end à la mer', date: d(12), endDate: d(14), allDay: true, start: '', end: '', place: 'La Rochelle', concerned: ALL_IDS, notes: 'Trouver une location pour 10.', addedBy: 'chacha', createdAt: Date.now() - 2e6, ...base },
+      { id: 'e5', title: 'Sport du jeudi', date: d(1), endDate: d(1), allDay: false, start: '18:30', end: '20:00', place: 'Gymnase', concerned: ['lili', 'apopo', 'lalo'], notes: '', addedBy: 'apopo', createdAt: Date.now() - 4e6, repeat: 'weekly', until: '', except: [], recurring: true, ...base },
       { id: 'e4', title: 'Café révisions', date: t, endDate: t, allDay: false, start: '17:30', end: '', place: 'BU', concerned: ['cleloche', 'chachounette'], notes: '', addedBy: 'cleloche', createdAt: Date.now() - 1e6, ...base },
     ],
     projects: [
@@ -103,8 +104,8 @@ function createDemoStore() {
       clean(c);
       data[c] = data[c].map(x => {
         if (x.id !== id) return x;
-        const n = { ...x };
-        for (const [k, val] of Object.entries(v)) { if (k.includes('.')) { const [a, b] = k.split('.'); n[a] = { ...(n[a] || {}), [b]: val }; } else n[k] = val; }
+        const n = JSON.parse(JSON.stringify(x));
+        for (const [k, val] of Object.entries(v)) { const p = k.split('.'); let o = n; p.slice(0, -1).forEach(a => { o[a] = o[a] || {}; o = o[a]; }); o[p[p.length - 1]] = val; }
         return n;
       });
       flush();
@@ -127,19 +128,47 @@ const failed = e => { console.error(e); toast("Enregistrement refusé. Vérifie 
 const write = p => { Promise.resolve(p).catch(failed); }; // hors ligne, la promesse attend le réseau : on n'attend pas pour fermer le formulaire.
 const log = (verb, kind, ref, title) => { const id = uid(); write(store.set('activity', id, { who: S.me, verb, kind, ref, title, at: Date.now() })); };
 
+/* ---------- Récurrence ---------- */
+const REPEATS = { daily: 'Chaque jour', weekly: 'Chaque semaine', biweekly: 'Toutes les 2 semaines', monthly: 'Chaque mois', yearly: 'Chaque année' };
+const dayDiff = (a, b) => Math.round((parse(b) - parse(a)) / 864e5);
+const duration = e => dayDiff(e.date, e.endDate || e.date);
+// Les mois sans ce jour (un 31, par exemple) sont sautés, comme dans Calendrier sur iPhone.
+function isOccurrence(e, s) {
+  if (!e.repeat) return s === e.date;
+  if (s < e.date || (e.until && s > e.until) || (e.except || []).includes(s)) return false;
+  const n = dayDiff(e.date, s), a = parse(e.date), b = parse(s);
+  return { daily: true, weekly: n % 7 === 0, biweekly: n % 14 === 0, monthly: a.getDate() === b.getDate(), yearly: a.getDate() === b.getDate() && a.getMonth() === b.getMonth() }[e.repeat] || false;
+}
+const instance = (e, s) => (e.repeat ? { ...e, seriesDate: e.date, occ: s, date: s, endDate: addDays(s, duration(e)) } : e);
+function occurrences(e, from, max, days) {
+  const out = [], start = from > e.date ? from : e.date;
+  for (let i = 0, d = start; i < days && out.length < max; i++, d = addDays(d, 1)) if (isOccurrence(e, d)) out.push(d);
+  return out;
+}
+const nextOcc = e => occurrences(e, addDays(today(), -duration(e)), 1, 800)[0] || e.date;
+const isCurrent = e => !!e.repeat ? occurrences(e, today(), 1, 800).length > 0 : (e.endDate || e.date) >= today();
+const rsvpOf = e => (e.repeat ? (e.rsvpOcc || {})[e.occ] || {} : e.rsvp || {});
+
 /* ---------- Agenda ---------- */
 const evSort = (a, b) => (a.allDay === b.allDay ? (a.start || '').localeCompare(b.start || '') : a.allDay ? -1 : 1) || a.title.localeCompare(b.title);
 const visible = () => S.data.events.filter(e => S.filter === 'all' || (e.concerned || []).includes(S.filter));
-const onDay = (list, d) => list.filter(e => e.date <= d && (e.endDate || e.date) >= d).sort(evSort);
+function onDay(list, d) {
+  const out = [];
+  for (const e of list) {
+    if (!e.repeat) { if (e.date <= d && (e.endDate || e.date) >= d) out.push(e); continue; }
+    for (let k = 0, dur = duration(e); k <= dur; k++) { const s = addDays(d, -k); if (isOccurrence(e, s)) { out.push(instance(e, s)); break; } }
+  }
+  return out.sort(evSort);
+}
 function evCard(e) {
   const multi = e.endDate && e.endDate !== e.date;
   const time = e.allDay ? 'Journée' : esc(e.start);
   const concerned = e.concerned || [];
   const names = concerned.length === 10 ? '<span>Toutes</span>' : `<span class="stack">${concerned.slice(0, 5).map(i => av(i, 's')).join('')}</span>${concerned.length > 5 ? `<span>+${concerned.length - 5}</span>` : ''}`;
-  return `<button class="ev" data-act="openEvent" data-id="${e.id}" style="--c:${person(e.addedBy).c}">
+  return `<button class="ev" data-act="openEvent" data-id="${e.id}" data-occ="${e.occ || ''}" style="--c:${person(e.addedBy).c}">
     <span class="ev-time">${time}${!e.allDay && e.end ? `<small>${esc(e.end)}</small>` : ''}</span><span class="ev-bar"></span>
     <span class="ev-main"><span class="ev-title">${esc(e.title)}</span>
-      ${e.place || multi ? `<span class="ev-sub">${[e.place && esc(e.place), multi && `jusqu'au ${dayShort(e.endDate)}`].filter(Boolean).join(' · ')}</span>` : ''}
+      ${e.place || multi || e.repeat ? `<span class="ev-sub">${[e.place && esc(e.place), multi && `jusqu'au ${dayShort(e.endDate)}`, e.repeat && `↻ ${REPEATS[e.repeat]}`].filter(Boolean).join(' · ')}</span>` : ''}
       <span class="ev-by">Ajouté par ${esc(person(e.addedBy).name)}<span class="sp"></span>${names}</span></span></button>`;
 }
 function monthView() {
@@ -158,7 +187,13 @@ function monthView() {
     ${evs.length ? `<div class="list">${evs.map(evCard).join('')}</div>` : `<div class="empty"><span>Rien de prévu ce jour-là.</span><button class="link" data-act="newEvent" data-d="${S.sel}">Ajouter quelque chose</button></div>`}`;
 }
 function upcomingView() {
-  const t = today(), list = visible().filter(e => (e.endDate || e.date) >= t).map(e => ({ e, k: e.date < t ? t : e.date })).sort((a, b) => a.k.localeCompare(b.k) || evSort(a.e, b.e));
+  const t = today(), list = [];
+  for (const e of visible()) {
+    // 8 dates maximum par série, sur un an, pour que la liste reste lisible.
+    if (e.repeat) { for (const s of occurrences(e, addDays(t, -duration(e)), 8, 366)) { const i = instance(e, s); list.push({ e: i, k: s < t ? t : s }); } }
+    else if ((e.endDate || e.date) >= t) list.push({ e, k: e.date < t ? t : e.date });
+  }
+  list.sort((a, b) => a.k.localeCompare(b.k) || evSort(a.e, b.e));
   if (!list.length) return emptyAgenda();
   let html = '', cur = null;
   for (const { e, k } of list) { if (k !== cur) { html += `${cur ? '</div>' : ''}<h2 class="sec-title">${esc(dayLong(k))}</h2><div class="list">`; cur = k; } html += evCard(e); }
@@ -192,7 +227,7 @@ function folderCard(p) {
   return `<button class="folder m-${esc(p.motif || 'bleu')}-t" data-act="openProject" data-id="${p.id}" style="background:none">
     <div class="f-back m-${esc(p.motif || 'bleu')}" style="background-image:none"></div>
     <div class="f-front motif m-${esc(p.motif || 'bleu')}"><div class="f-label"><strong>${esc(p.title)}</strong>
-    <span class="f-meta"><span>${ts.length ? `${done}/${ts.length} ${ts.length > 1 ? 'tâches' : 'tâche'}` : 'Aucune tâche'}</span><span>${ev ? dayShort(ev.date) : ''}</span></span>
+    <span class="f-meta"><span>${ts.length ? `${done}/${ts.length} ${ts.length > 1 ? 'tâches' : 'tâche'}` : 'Aucune tâche'}</span><span>${ev ? dayShort(ev.repeat ? nextOcc(ev) : ev.date) : ''}</span></span>
     <span class="bar"><i style="width:${ts.length ? Math.round(100 * done / ts.length) : 0}%"></i></span></div></div></button>`;
 }
 function taskRow(t, showProject) {
@@ -295,32 +330,38 @@ function whenText(e) {
 }
 const motifFor = id => MOTIFS[ALL_IDS.indexOf(id) % MOTIFS.length] || 'bleu';
 const SHEETS = {
-  event({ id }) {
-    const e = S.data.events.find(x => x.id === id); if (!e) return null;
-    const rsvp = e.rsvp || {}, mine = rsvp[S.me];
+  event({ id, occ }) {
+    const base = S.data.events.find(x => x.id === id); if (!base) return null;
+    if (base.repeat && occ && !isOccurrence(base, occ)) return null;
+    const e = base.repeat ? instance(base, occ || nextOcc(base)) : base;
+    const rsvp = rsvpOf(e), mine = rsvp[S.me];
     const by = v => Object.keys(rsvp).filter(k => rsvp[k] === v);
     const proj = S.data.projects.find(p => p.eventId === e.id);
     const answers = [['yes', 'Viennent'], ['maybe', 'Peut-être'], ['no', 'Ne viennent pas']].filter(([v]) => by(v).length).map(([v, l]) => `<div class="row"><div class="row-main"><small>${l} (${by(v).length})</small>${names(by(v))}</div></div>`).join('');
-    return nav('', closeBtn(), `<button class="nav-btn" data-act="editEvent" data-id="${e.id}">Modifier</button>`) + `<div class="sheet-body">
+    return nav('', closeBtn(), `<button class="nav-btn" data-act="editEvent" data-id="${e.id}" data-occ="${e.occ || ''}">Modifier</button>`) + `<div class="sheet-body">
       <div class="hero motif m-${motifFor(e.addedBy)}"></div><h1 class="d-title">${esc(e.title)}</h1>
-      <div class="group"><div class="row">${I.clock}<div class="row-main">${esc(whenText(e))}</div></div>
+      <div class="group"><div class="row">${I.clock}<div class="row-main">${esc(whenText(e))}${e.repeat ? `<small>↻ ${REPEATS[e.repeat]}${e.until ? ` jusqu'au ${dayShort(e.until)}` : ''}</small>` : ''}</div></div>
       ${e.place ? `<div class="row">${I.pin}<div class="row-main">${esc(e.place)}</div></div>` : ''}
       <div class="row">${I.people}<div class="row-main"><small>Concerne</small>${(e.concerned || []).length === 10 ? 'Toutes les crevettes' : names(e.concerned || [])}</div></div>
       ${e.notes ? `<div class="row">${I.note}<div class="row-main">${esc(e.notes)}</div></div>` : ''}
       <div class="row">${av(e.addedBy, 's')}<div class="row-main"><small>Ajouté par</small>${esc(person(e.addedBy).name)}${e.editedBy ? `<small>Modifié en dernier par ${esc(person(e.editedBy).name)}</small>` : ''}</div></div></div>
-      <div class="stack-v"><div class="flabel">Ta réponse, ${esc(person(S.me).name)}</div><div class="rsvp" role="group">${[['yes', 'Je viens'], ['maybe', 'Peut-être'], ['no', 'Je ne viens pas']].map(([v, l]) => `<button data-act="rsvp" data-id="${e.id}" data-v="${v}" aria-pressed="${mine === v}">${l}</button>`).join('')}</div></div>
+      <div class="stack-v"><div class="flabel">Ta réponse${e.repeat ? ` pour le ${dayShort(e.occ)}` : ''}, ${esc(person(S.me).name)}</div><div class="rsvp" role="group">${[['yes', 'Je viens'], ['maybe', 'Peut-être'], ['no', 'Je ne viens pas']].map(([v, l]) => `<button data-act="rsvp" data-id="${e.id}" data-occ="${e.occ || ''}" data-v="${v}" aria-pressed="${mine === v}">${l}</button>`).join('')}</div></div>
       ${answers ? `<div class="group">${answers}</div>` : ''}
       <button class="btn primary" data-act="${proj ? 'openProject' : 'organize'}" data-id="${proj ? proj.id : e.id}">${I.folder}${proj ? 'Voir son dossier' : 'Organiser ça'}</button>
-      <button class="btn danger" data-act="askDeleteEvent" data-id="${e.id}">Supprimer ce rendez-vous</button></div>`;
+      <button class="btn danger" data-act="askDeleteEvent" data-id="${e.id}" data-occ="${e.occ || ''}">Supprimer ce rendez-vous</button></div>`;
   },
-  eventForm({ id, date }) {
-    const e = id ? S.data.events.find(x => x.id === id) : null; const d = date || S.sel || today();
+  eventForm({ id, date, occ, scope }) {
+    const found = id ? S.data.events.find(x => x.id === id) : null; const d = date || S.sel || today();
+    const e = found && scope === 'one' ? instance(found, occ) : found;
     const v = e || { title: '', date: d, endDate: d, allDay: false, start: '', end: '', place: '', notes: '', concerned: [S.me], addedBy: S.me };
-    return `<form data-form="event" data-id="${id || ''}" novalidate style="display:contents">` + nav(id ? 'Modifier' : 'Nouveau rendez-vous', closeBtn('Annuler'), `<button class="nav-btn strong" type="submit">${id ? 'OK' : 'Ajouter'}</button>`) + `<div class="sheet-body">
+    return `<form data-form="event" data-id="${id || ''}" data-scope="${scope || ''}" data-occ="${occ || ''}" novalidate style="display:contents">` + nav(scope === 'one' ? `Modifier le ${dayShort(occ)}` : id ? 'Modifier' : 'Nouveau rendez-vous', closeBtn('Annuler'), `<button class="nav-btn strong" type="submit">${id ? 'OK' : 'Ajouter'}</button>`) + `<div class="sheet-body">
       <div class="fgroup"><label for="f-title">Titre <em>*</em></label><input id="f-title" class="input" name="title" maxlength="120" value="${esc(v.title)}" placeholder="Ex. Dîner chez Lili" autocomplete="off"></div>
       <div class="switch-row"><span id="ad">Toute la journée</span><button type="button" class="switch" role="switch" aria-labelledby="ad" aria-checked="${!!v.allDay}" data-act="toggleAllDay"></button><input type="hidden" name="allDay" value="${v.allDay ? 1 : ''}"></div>
       <div class="two"><div class="fgroup"><label for="f-date">Début <em>*</em></label><input id="f-date" class="input" type="date" name="date" value="${esc(v.date)}"></div><div class="fgroup"><label for="f-end">Fin</label><input id="f-end" class="input" type="date" name="endDate" value="${esc(v.endDate || v.date)}"></div></div>
       <div class="two" data-times ${v.allDay ? 'hidden' : ''}><div class="fgroup"><label for="f-st">Heure de début <em>*</em></label><input id="f-st" class="input" type="time" name="start" value="${esc(v.start)}"></div><div class="fgroup"><label for="f-en">Heure de fin</label><input id="f-en" class="input" type="time" name="end" value="${esc(v.end)}"></div></div>
+      ${scope === 'one' ? '' : `<div class="two"><div class="fgroup"><label for="f-rep">Répéter</label><select id="f-rep" class="input" name="repeat" data-repeat><option value="">Jamais</option>${Object.entries(REPEATS).map(([k, l]) => `<option value="${k}" ${v.repeat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="fgroup" data-until ${v.repeat ? '' : 'hidden'}><label for="f-until">Jusqu'au (facultatif)</label><input id="f-until" class="input" type="date" name="until" value="${esc(v.until || '')}"></div></div>
+      <p class="hint" data-monthly ${v.repeat === 'monthly' ? '' : 'hidden'}>Si ce jour n'existe pas dans un mois (un 31, par exemple), ce mois est sauté.</p>`}
       <div class="fgroup"><label for="f-place">Où</label><input id="f-place" class="input" name="place" maxlength="200" value="${esc(v.place)}" placeholder="Lieu" autocomplete="off"></div>
       <div class="fgroup"><span class="flabel">Ça concerne qui ? <em>*</em></span>${pickMany('concerned', v.concerned || [])}</div>
       <div class="fgroup"><label for="f-notes">Notes</label><textarea id="f-notes" class="input" name="notes" maxlength="3000">${esc(v.notes)}</textarea></div>
@@ -332,7 +373,7 @@ const SHEETS = {
     const ts = tasksOf(p.id), done = ts.filter(t => t.done).length, ev = S.data.events.find(e => e.id === p.eventId);
     return nav('', closeBtn(), `<button class="nav-btn" data-act="editProject" data-id="${p.id}">Modifier</button>`) + `<div class="sheet-body">
       <div class="hero motif m-${esc(p.motif || 'bleu')}"></div><h1 class="d-title">${esc(p.title)}</h1>
-      <div class="group">${ev ? `<button class="row tap" data-act="openEvent" data-id="${ev.id}">${I.cal}<div class="row-main"><small>Rendez-vous lié</small>${esc(ev.title)} · ${esc(dayLong(ev.date))}</div></button>` : ''}
+      <div class="group">${ev ? `<button class="row tap" data-act="openEvent" data-id="${ev.id}" data-occ="${ev.repeat ? nextOcc(ev) : ''}">${I.cal}<div class="row-main"><small>Rendez-vous lié</small>${esc(ev.title)} · ${esc(dayLong(ev.repeat ? nextOcc(ev) : ev.date))}${ev.repeat ? `<small>↻ ${REPEATS[ev.repeat]}</small>` : ''}</div></button>` : ''}
       ${p.notes ? `<div class="row">${I.note}<div class="row-main">${esc(p.notes)}</div></div>` : ''}
       <div class="row">${av(p.addedBy, 's')}<div class="row-main"><small>Créé par</small>${esc(person(p.addedBy).name)}${p.editedBy ? `<small>Modifié en dernier par ${esc(person(p.editedBy).name)}</small>` : ''}</div></div></div>
       <div class="stack-v"><div class="flabel">Tâches${ts.length ? ` : ${done} sur ${ts.length} terminée${done > 1 ? 's' : ''}` : ''}</div>${ts.length ? `<div class="bar"><i style="width:${Math.round(100 * done / ts.length)}%"></i></div><div class="group">${ts.map(t => taskRow(t)).join('')}</div>` : ''}
@@ -342,11 +383,11 @@ const SHEETS = {
   projectForm({ id, eventId, title }) {
     const p = id ? S.data.projects.find(x => x.id === id) : null;
     const v = p || { title: title || '', motif: MOTIFS[S.data.projects.length % MOTIFS.length], notes: '', eventId: eventId || '', addedBy: S.me };
-    const upcoming = S.data.events.filter(e => (e.endDate || e.date) >= today() || e.id === v.eventId).sort((a, b) => a.date.localeCompare(b.date));
+    const upcoming = S.data.events.filter(e => isCurrent(e) || e.id === v.eventId).sort((a, b) => a.date.localeCompare(b.date));
     return `<form data-form="project" data-id="${id || ''}" novalidate style="display:contents">` + nav(id ? 'Modifier' : 'Nouveau dossier', closeBtn('Annuler'), `<button class="nav-btn strong" type="submit">${id ? 'OK' : 'Créer'}</button>`) + `<div class="sheet-body">
       <div class="fgroup"><label for="p-title">Nom du dossier <em>*</em></label><input id="p-title" class="input" name="title" maxlength="120" value="${esc(v.title)}" placeholder="Ex. Week-end à la mer" autocomplete="off"></div>
       <div class="fgroup"><span class="flabel">Motif</span><div class="mpick" data-pick="motif" data-single="1">${MOTIFS.map(m => `<button type="button" class="motif m-${m}" data-pv="${m}" aria-label="Motif ${m}" aria-pressed="${m === v.motif}"></button>`).join('')}</div></div>
-      <div class="fgroup"><label for="p-ev">Rendez-vous lié</label><select id="p-ev" class="input" name="eventId"><option value="">Aucun</option>${upcoming.map(e => `<option value="${e.id}" ${e.id === v.eventId ? 'selected' : ''}>${esc(e.title)} (${dayShort(e.date)})</option>`).join('')}</select></div>
+      <div class="fgroup"><label for="p-ev">Rendez-vous lié</label><select id="p-ev" class="input" name="eventId"><option value="">Aucun</option>${upcoming.map(e => `<option value="${e.id}" ${e.id === v.eventId ? 'selected' : ''}>${esc(e.title)} (${e.repeat ? REPEATS[e.repeat].toLowerCase() : dayShort(e.date)})</option>`).join('')}</select></div>
       <div class="fgroup"><label for="p-notes">Notes</label><textarea id="p-notes" class="input" name="notes" maxlength="3000">${esc(v.notes)}</textarea></div>
       ${id ? `<div class="fgroup"><span class="flabel">Créé par</span><div class="switch-row"><span class="name">${av(v.addedBy, 's')}${esc(person(v.addedBy).name)}</span></div></div>` : `<div class="fgroup"><span class="flabel">Créé par</span><div class="switch-row"><span class="name">${av(S.me, 's')}${esc(person(S.me).name)}</span></div></div>`}
       <div class="err" data-err hidden></div></div></form>`;
@@ -355,8 +396,8 @@ const SHEETS = {
     return nav('Nouveau dossier', closeBtn('Annuler')) + `<div class="sheet-body"><button class="btn" data-act="newProject">${I.plus}Créer à la main</button><div class="flabel">Ou piocher dans l'agenda</div>${SHEETS.pickList()}</div>`;
   },
   pickList() {
-    const list = S.data.events.filter(e => (e.endDate || e.date) >= today() && !S.data.projects.some(p => p.eventId === e.id)).sort((a, b) => a.date.localeCompare(b.date));
-    return list.length ? `<div class="group">${list.map(e => `<button class="row tap" data-act="organize" data-id="${e.id}">${I.cal}<div class="row-main">${esc(e.title)}<small>${esc(dayLong(e.date))}</small></div></button>`).join('')}</div>` : '<div class="empty"><span>Aucun rendez-vous à venir sans dossier.</span></div>';
+    const list = S.data.events.filter(e => isCurrent(e) && !S.data.projects.some(p => p.eventId === e.id)).sort((a, b) => a.date.localeCompare(b.date));
+    return list.length ? `<div class="group">${list.map(e => `<button class="row tap" data-act="organize" data-id="${e.id}">${I.cal}<div class="row-main">${esc(e.title)}<small>${esc(e.repeat ? REPEATS[e.repeat] + ', prochain : ' + dayLong(nextOcc(e)) : dayLong(e.date))}</small></div></button>`).join('')}</div>` : '<div class="empty"><span>Aucun rendez-vous à venir sans dossier.</span></div>';
   },
   taskForm({ id, projectId }) {
     const t = id ? S.data.tasks.find(x => x.id === id) : null;
@@ -367,6 +408,17 @@ const SHEETS = {
       <div class="fgroup"><label for="t-due">Échéance</label><input id="t-due" class="input" type="date" name="due" value="${esc(v.due)}"></div>
       ${id ? `<div class="fgroup"><span class="flabel">Ajoutée par</span><div class="switch-row"><span class="name">${av(v.addedBy, 's')}${esc(person(v.addedBy).name)}</span></div></div><button type="button" class="btn danger" data-act="deleteTask" data-id="${id}">Supprimer cette tâche</button>` : `<div class="fgroup"><span class="flabel">Ajoutée par</span><div class="switch-row"><span class="name">${av(S.me, 's')}${esc(person(S.me).name)}</span></div></div>`}
       <div class="err" data-err hidden></div></div></form>`;
+  },
+  editChoice({ id, occ }) {
+    return nav('Modifier', closeBtn('Annuler')) + `<div class="sheet-body"><p class="confirm-txt">Ce rendez-vous se répète. Que veux-tu modifier ?</p><div class="stack-v">
+      <button class="btn" data-act="editOne" data-id="${id}" data-occ="${occ}">Seulement le ${esc(dayShort(occ))}</button><button class="btn" data-act="editAll" data-id="${id}">Toute la série</button></div></div>`;
+  },
+  deleteChoice({ id, occ }) {
+    const e = S.data.events.find(x => x.id === id); if (!e) return null;
+    return nav('Supprimer', closeBtn('Annuler')) + `<div class="sheet-body"><p class="confirm-txt">« ${esc(e.title)} » se répète. Que veux-tu supprimer pour tout le monde ?</p><div class="stack-v">
+      <button class="btn" data-act="deleteOcc" data-id="${id}" data-occ="${occ}">Seulement le ${esc(dayShort(occ))}</button>
+      ${occ !== e.date ? `<button class="btn" data-act="deleteFollowing" data-id="${id}" data-occ="${occ}">Le ${esc(dayShort(occ))} et les suivants</button>` : ''}
+      <button class="btn primary" data-act="deleteEvent" data-id="${id}">Toute la série</button></div></div>`;
   },
   confirm({ text, act, id, label }) {
     return nav('Confirmer', closeBtn('Annuler')) + `<div class="sheet-body"><p class="confirm-txt">${esc(text)}</p><button class="btn primary" data-act="${act}" data-id="${id}">${esc(label)}</button></div>`;
@@ -412,18 +464,30 @@ const A = {
   prevMonth() { moveMonth(-1); }, nextMonth() { moveMonth(1); },
   goToday() { const n = new Date(); S.y = n.getFullYear(); S.m = n.getMonth(); S.sel = today(); render(); },
   closeSheet() { closeSheet(); },
-  openEvent(b) { openSheet('event', { id: b.dataset.id }); },
+  openEvent(b) { openSheet('event', { id: b.dataset.id, occ: b.dataset.occ || '' }); },
   newEvent(b) { openSheet('eventForm', { date: b.dataset.d || today() }); },
-  editEvent(b) { openSheet('eventForm', { id: b.dataset.id }); },
+  editEvent(b) { if (b.dataset.occ) openSheet('editChoice', { id: b.dataset.id, occ: b.dataset.occ }); else openSheet('eventForm', { id: b.dataset.id }); },
+  editOne(b) { const { id, occ } = b.dataset; closeSheet(); openSheet('eventForm', { id, occ, scope: 'one' }); },
+  editAll(b) { const { id } = b.dataset; closeSheet(); openSheet('eventForm', { id }); },
   toggleAllDay(b) { const on = b.getAttribute('aria-checked') !== 'true'; b.setAttribute('aria-checked', on); const f = b.closest('form'); f.elements.allDay.value = on ? 1 : ''; f.querySelector('[data-times]').hidden = on; },
   rsvp(b) {
-    const e = S.data.events.find(x => x.id === b.dataset.id); if (!e) return;
-    const v = b.dataset.v, cur = (e.rsvp || {})[S.me];
-    const next = { ...(e.rsvp || {}) }; if (cur === v) delete next[S.me]; else next[S.me] = v;
-    write(store.update('events', e.id, { rsvp: next }));
-    if (cur !== v) log({ yes: 'vient à', maybe: 'viendra peut-être à', no: 'ne vient pas à' }[v], 'event', e.id, e.title);
+    const base = S.data.events.find(x => x.id === b.dataset.id); if (!base) return;
+    const v = b.dataset.v, occ = base.repeat ? b.dataset.occ : '', cur = rsvpOf(occ ? instance(base, occ) : base)[S.me];
+    // Une seule case est écrite : deux réponses envoyées en même temps ne s'écrasent pas.
+    write(store.update('events', base.id, { [occ ? `rsvpOcc.${occ}.${S.me}` : `rsvp.${S.me}`]: cur === v ? null : v }));
+    if (cur !== v) log({ yes: 'vient à', maybe: 'viendra peut-être à', no: 'ne vient pas à' }[v], 'event', base.id, occ ? `${base.title} (${dayShort(occ)})` : base.title);
   },
-  askDeleteEvent(b) { const e = S.data.events.find(x => x.id === b.dataset.id); openSheet('confirm', { text: `Supprimer « ${e.title} » pour tout le monde ?`, act: 'deleteEvent', id: e.id, label: 'Supprimer' }); },
+  deleteOcc(b) {
+    const e = S.data.events.find(x => x.id === b.dataset.id), occ = b.dataset.occ; closeSheet(); closeSheet(); if (!e) return;
+    write(store.update('events', e.id, { except: [...(e.except || []), occ], editedBy: S.me })); log(`a supprimé le ${dayShort(occ)} de`, 'event', e.id, e.title);
+    toast('Date supprimée', () => write(store.set('events', e.id, strip(e))));
+  },
+  deleteFollowing(b) {
+    const e = S.data.events.find(x => x.id === b.dataset.id), occ = b.dataset.occ; closeSheet(); closeSheet(); if (!e) return;
+    write(store.update('events', e.id, { until: addDays(occ, -1), editedBy: S.me })); log(`a supprimé à partir du ${dayShort(occ)}`, 'event', e.id, e.title);
+    toast('Dates suivantes supprimées', () => write(store.set('events', e.id, strip(e))));
+  },
+  askDeleteEvent(b) { if (b.dataset.occ) { openSheet('deleteChoice', { id: b.dataset.id, occ: b.dataset.occ }); return; } const e = S.data.events.find(x => x.id === b.dataset.id); openSheet('confirm', { text: `Supprimer « ${e.title} » pour tout le monde ?`, act: 'deleteEvent', id: e.id, label: 'Supprimer' }); },
   deleteEvent(b) {
     const e = S.data.events.find(x => x.id === b.dataset.id); closeSheet(); closeSheet(); if (!e) return;
     write(store.remove('events', e.id)); log('a supprimé', 'none', '', e.title);
@@ -447,7 +511,7 @@ const A = {
   editTask(b) { openSheet('taskForm', { id: b.dataset.id }); },
   toggleTask(b) { const t = S.data.tasks.find(x => x.id === b.dataset.id); if (!t) return; write(store.update('tasks', t.id, { done: !t.done })); log(t.done ? 'a rouvert' : 'a terminé', 'project', t.projectId, t.title); },
   deleteTask(b) { const t = S.data.tasks.find(x => x.id === b.dataset.id); closeSheet(); if (!t) return; write(store.remove('tasks', t.id)); log('a supprimé', 'project', t.projectId, t.title); toast('Tâche supprimée', () => write(store.set('tasks', t.id, strip(t)))); },
-  openActivity(b) { const { kind, ref } = b.dataset; if (kind === 'event' && S.data.events.some(e => e.id === ref)) openSheet('event', { id: ref }); else if (kind === 'project' && S.data.projects.some(p => p.id === ref)) openSheet('project', { id: ref }); else if (kind !== 'none') toast('Cet élément a été supprimé, ou est trop ancien pour être chargé.'); },
+  openActivity(b) { const { kind, ref } = b.dataset; if (kind === 'event' && S.data.events.some(e => e.id === ref)) openSheet('event', { id: ref, occ: '' }); else if (kind === 'project' && S.data.projects.some(p => p.id === ref)) openSheet('project', { id: ref }); else if (kind !== 'none') toast('Cet élément a été supprimé, ou est trop ancien pour être chargé.'); },
 };
 document.addEventListener('click', e => {
   const pv = e.target.closest('[data-pv],[data-pall]');
@@ -460,6 +524,12 @@ document.addEventListener('click', e => {
     return;
   }
   const b = e.target.closest('[data-act]'); if (b && A[b.dataset.act]) { e.preventDefault(); A[b.dataset.act](b); }
+});
+document.addEventListener('change', e => {
+  if (!e.target.matches?.('[data-repeat]')) return;
+  const f = e.target.closest('form');
+  f.querySelector('[data-until]').hidden = !e.target.value;
+  f.querySelector('[data-monthly]').hidden = e.target.value !== 'monthly';
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && stack.length) closeSheet(); });
 const picked = (f, n) => [...f.querySelectorAll(`[data-pick="${n}"] [data-pv][aria-pressed="true"]`)].map(x => x.dataset.pv);
@@ -495,6 +565,16 @@ const SUBMIT = {
     if (!allDay && end && endDate === date && end <= start) return fail(f, "L'heure de fin doit suivre l'heure de début.", 'end');
     if (!concerned.length) return fail(f, 'Choisis au moins une personne concernée.');
     const base = { title, date, endDate, allDay, start, end, place: g('place'), notes: g('notes'), concerned };
+    if (f.dataset.scope === 'one') {
+      // Une date modifiée devient un rendez-vous à part, et quitte la série.
+      const s = S.data.events.find(x => x.id === id), occ = f.dataset.occ, nid = uid();
+      write(store.set('events', nid, { ...base, addedBy: s.addedBy, editedBy: S.me, rsvp: (s.rsvpOcc || {})[occ] || {}, createdAt: Date.now() }));
+      write(store.update('events', id, { except: [...(s.except || []), occ], editedBy: S.me }));
+      log('a modifié', 'event', nid, title); closeSheet(); toast('Date modifiée'); return;
+    }
+    const repeat = g('repeat'), until = repeat ? g('until') : '';
+    if (until && until < date) return fail(f, 'La date « Jusqu\'au » doit suivre la date de début.', 'until');
+    Object.assign(base, { repeat, until, recurring: !!repeat });
     if (id) { write(store.update('events', id, { ...base, editedBy: S.me })); log('a modifié', 'event', id, title); closeSheet(); toast('Rendez-vous modifié'); return; }
     const addedBy = S.me;
     const nid = uid(); write(store.set('events', nid, { ...base, addedBy, editedBy: null, rsvp: {}, createdAt: Date.now() }));

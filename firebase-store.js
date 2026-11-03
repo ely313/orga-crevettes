@@ -21,15 +21,21 @@ export function createFirebaseStore(sdk, config, opts = {}) {
     changeCode: code => updatePassword(authApi.currentUser, code),
     signOut: () => signOut(authApi),
   };
-  const data = { events: [], projects: [], tasks: [], activity: [] };
+  const data = { events: [], recurring: [], projects: [], tasks: [], activity: [] };
   let notify = () => {}, onError = () => {}, windowStart = null;
   // Juste après la connexion, Firebase peut refuser une lecture le temps de reconnaître le compte.
   // On réessaie donc quelques fois avant d'afficher une erreur.
   const stops = {}, gens = {};
+  // Une série qui a commencé il y a longtemps reste chargée, même hors de la fenêtre de 3 mois.
+  const emit = () => {
+    const events = new Map();
+    [...data.events, ...data.recurring].forEach(e => events.set(e.id, e));
+    notify({ ...data, events: [...events.values()] });
+  };
   function listen(name, q, tries = 0) {
     if (stops[name]) stops[name]();
     const gen = (gens[name] = (gens[name] || 0) + 1);
-    stops[name] = onSnapshot(q, s => { data[name] = s.docs.map(d => ({ id: d.id, ...d.data() })); notify({ ...data }); }, e => {
+    stops[name] = onSnapshot(q, s => { data[name] = s.docs.map(d => ({ id: d.id, ...d.data() })); emit(); }, e => {
       if (gen !== gens[name]) return;
       console.error('Lecture refusée :', name, 'essai', tries + 1, e.code);
       if (e.code === 'permission-denied' && tries < 4) { setTimeout(() => { if (gen === gens[name]) listen(name, q, tries + 1); }, 1000 * (tries + 1)); return; }
@@ -44,6 +50,7 @@ export function createFirebaseStore(sdk, config, opts = {}) {
     subscribe(cb, err, start) {
       notify = cb; onError = err || onError; windowStart = start;
       listenEvents();
+      listen('recurring', query(collection(db, 'events'), where('recurring', '==', true)));
       listen('projects', collection(db, 'projects'));
       listen('tasks', collection(db, 'tasks'));
       listen('activity', query(collection(db, 'activity'), orderBy('at', 'desc'), limit(40)));
