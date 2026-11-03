@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isPerson(p) {
+      return p in ['myeline','paupau','mcpauline','chacha','chachounette','lili','cleloche','lalo','apopo','loulou'];
+    }
+    function isMe(p) { return request.auth != null && request.auth.token.email == p + '@crevettes.example.com'; }
+    // Seuls les 10 comptes prévus entrent : une autre adresse est refusée partout.
+    function isMember() {
+      return request.auth != null && request.auth.token.email.matches('.*@crevettes[.]example[.]com')
+        && isPerson(request.auth.token.email.split('@')[0]);
+    }
+    function isText(v, max) { return v is string && v.size() <= max; }
+    function hasTitle(d) { return d.title is string && d.title.size() > 0 && d.title.size() <= 120; }
+    function sameAuthor() { return request.resource.data.addedBy == resource.data.addedBy; }
+    function validEvent(d) {
+      return hasTitle(d) && isPerson(d.addedBy)
+        && d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && d.endDate is string && d.endDate >= d.date
+        && isText(d.place, 200) && isText(d.notes, 3000) && d.concerned is list && d.concerned.size() <= 10;
+    }
+    function validProject(d) { return hasTitle(d) && isPerson(d.addedBy) && isText(d.notes, 3000); }
+    function validTask(d) { return hasTitle(d) && isPerson(d.addedBy) && d.projectId is string && d.done is bool; }
+
+    // Dit seulement si un prénom a déjà créé son code, pour afficher le bon écran.
+    match /comptes/{id} {
+      allow read: if true;
+      allow create: if isPerson(id) && isMe(id);
+      allow update, delete: if false;
+    }
+    match /events/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && validEvent(request.resource.data);
+      allow update: if isMember() && validEvent(request.resource.data) && sameAuthor();
+      allow delete: if isMember();
+    }
+    match /projects/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && validProject(request.resource.data);
+      allow update: if isMember() && validProject(request.resource.data) && sameAuthor();
+      allow delete: if isMember();
+    }
+    match /tasks/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && validTask(request.resource.data);
+      allow update: if isMember() && validTask(request.resource.data) && sameAuthor();
+      allow delete: if isMember();
+    }
+    match /activity/{id} {
+      allow read: if isMember();
+      allow create: if isMe(request.resource.data.who) && request.resource.data.at is number;
+      allow update, delete: if false;
+    }
+  }
+}
